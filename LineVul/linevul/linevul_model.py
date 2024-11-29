@@ -67,3 +67,27 @@ class Model(RobertaForSequenceClassification):
                 return loss, prob
             else:
                 return prob
+
+
+class DeepDFAModel(RobertaForSequenceClassification):   
+    def __init__(self, flowgnn_encoder, config):
+        super(DeepDFAModel, self).__init__(config=config)
+        self.encoder = flowgnn_encoder
+        self.dense = nn.Linear(self.encoder.out_dim, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.out_proj = nn.Linear(config.hidden_size, 2)
+
+    def forward(self, input_embed=None, labels=None, graphs=None, output_attentions=False, input_ids=None):
+        flowgnn_embed = self.encoder(graphs, {})
+        feats = self.dropout(flowgnn_embed)
+        feats = self.dense(feats)
+        feats = torch.tanh(feats)
+        feats = self.dropout(feats)
+        feats = self.out_proj(feats)
+        prob = torch.softmax(feats, dim=-1)
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(feats, labels)
+            return loss, prob
+        else:
+            return prob

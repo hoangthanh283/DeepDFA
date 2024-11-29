@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampl
 from transformers import (AdamW, get_linear_schedule_with_warmup,
                           RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer)
 from tqdm import tqdm
-from linevul_model import Model
+from linevul_model import Model, DeepDFAModel
 import pandas as pd
 # metrics
 from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, classification_report, confusion_matrix
@@ -191,10 +191,15 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
             if flowgnn_dataset is None:
                 graphs=None
             else:
-                graphs, keep_idx = flowgnn_dataset.get_indices(index)
-                num_missing += len(labels) - len(keep_idx)
-                inputs_ids = inputs_ids[keep_idx]
-                labels = labels[keep_idx]
+                try:
+                    graphs, keep_idx = flowgnn_dataset.get_indices(index)
+                    num_missing += len(labels) - len(keep_idx)
+                    inputs_ids = inputs_ids[keep_idx]
+                    labels = labels[keep_idx]
+                except:
+                    logger.info("HAS GRAPH DATA !!!")
+                    continue
+
             model.train()
             loss, logits = model(input_ids=inputs_ids, labels=labels, graphs=graphs)
             if args.n_gpu > 1:
@@ -231,7 +236,7 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
                         logger.info("  "+"*"*20)  
                         logger.info("  Best f1:%s",round(best_f1,4))
                         logger.info("  "+"*"*20)                          
-                        
+
                         checkpoint_prefix = 'checkpoint-best-f1'
                         output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))                        
                         if not os.path.exists(output_dir):
@@ -240,6 +245,7 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
                         output_dir = os.path.join(output_dir, '{}'.format(args.model_name)) 
                         torch.save(model_to_save.state_dict(), output_dir)
                         logger.info("Saving model checkpoint to %s", output_dir)
+
         logger.info("%d items missing", num_missing)
         checkpoint_prefix = 'checkpoint-last'
         output_dir = os.path.join(args.output_dir, '{}'.format(checkpoint_prefix))                        
@@ -601,7 +607,7 @@ def main():
             encoder_mode=True,
         )
         logger.info("FlowGNN output dim: %d", flowgnn_model.out_dim)
-
+    
     config = RobertaConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path)
     config.num_labels = 1
     config.num_attention_heads = args.num_attention_heads
@@ -613,52 +619,67 @@ def main():
                                      merges_file="bpe_tokenizer/bpe_tokenizer-merges.txt")
     else:
         tokenizer = RobertaTokenizer.from_pretrained(args.tokenizer_name)
-    if args.use_non_pretrained_model:
-        model = RobertaForSequenceClassification(config=config)
+
+    if args.model_type != "deepdfa":
+        if args.use_non_pretrained_model:
+            model = RobertaForSequenceClassification(config=config)
+        else:
+            model = RobertaForSequenceClassification.from_pretrained(args.model_name_or_path, config=config, ignore_mismatched_sizes=True)    
+        # TODO: add flowgnn to model
+        model = Model(model, flowgnn_model, config, tokenizer, args)
     else:
-        model = RobertaForSequenceClassification.from_pretrained(args.model_name_or_path, config=config, ignore_mismatched_sizes=True)    
-    # TODO: add flowgnn to model
-    model = Model(model, flowgnn_model, config, tokenizer, args)
+        model = DeepDFAModel(flowgnn_model, config)
 
     # print number of params
     def count_params(model):
         if model is None:
             return 0
         return sum(p.numel() for p in model.parameters())
-    params = count_params(model.encoder) + count_params(model.classifier)
-    if not args.no_flowgnn:
-        params += count_params(model.flowgnn_encoder)
+
+    # params = count_params(model.encoder) + count_params(model.classifier)
+    params = count_params(model)
+    # if not args.no_flowgnn:
+    #     params += count_params(model.flowgnn_encoder)
     print("parameters:", params)
-    print("encoder:", model.encoder)
-    print("classifier:", model.classifier)
-    if not args.no_flowgnn:
-        print("flowgnn_encoder:", model.flowgnn_encoder)
+    if args.model_type != "deepdfa":
+        print("encoder:", model.encoder)
+        print("classifier:", model.classifier)
+        if not args.no_flowgnn:
+            print("flowgnn_encoder:", model.flowgnn_encoder)
+    else:
+        print("model:", model)
 
     # Training
     if args.do_train:
         train_dataset = TextDataset(tokenizer, args, file_type='train', return_index=True)
         eval_dataset = TextDataset(tokenizer, args, file_type='eval', return_index=True)
         train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset)
+
     # Evaluation
     if args.do_eval:
-        output_dir = os.path.join(args.output_dir, args.model_name, 'checkpoint-best-f1', 'model.bin')
+        eval_dataset = TextDataset(tokenizer, args, file_type='eval', return_index=True)
+        # output_dir = os.path.join(args.output_dir, args.model_name, 'checkpoint-best-f1', 'model.bin')
+        output_dir = os.path.join(args.output_dir, 'checkpoint-last', '1_linevul.bin')
         model.load_state_dict(torch.load(output_dir))
         model.to(args.device)
-        evaluate(args, model, tokenizer)
+        evaluate(args, model, tokenizer, eval_dataset, flowgnn_dataset)
+
     # Test
     if args.do_test:
-        if os.path.exists(args.model_name):
-            output_dir = args.model_name
-        else:
-            checkpoint_prefix = f'checkpoint-best-f1/{args.model_name}'
-            output_dir = os.path.join(args.output_dir, checkpoint_prefix)
-            if not os.path.exists(output_dir):
-                output_dir = os.path.join(args.output_dir, 'checkpoint-best-f1', args.model_name)
-            if not os.path.exists(output_dir):
-                output_dir = os.path.join(args.output_dir, args.model_name, 'checkpoint-best-f1', 'model.bin')
-            if not os.path.exists(output_dir):
-                # linevul/saved_models/dataset_size/imbalanced_0.01/checkpoint-best-f1
-                output_dir = os.path.join(args.output_dir, args.model_name, 'checkpoint-best-f1', 'model.bin')
+        # if os.path.exists(args.model_name):
+        #     output_dir = args.model_name
+        # else:
+        #     checkpoint_prefix = f'checkpoint-best-f1/{args.model_name}'
+        #     output_dir = os.path.join(args.output_dir, checkpoint_prefix)
+        #     if not os.path.exists(output_dir):
+        #         output_dir = os.path.join(args.output_dir, 'checkpoint-best-f1', args.model_name)
+        #     if not os.path.exists(output_dir):
+        #         output_dir = os.path.join(args.output_dir, args.model_name, 'checkpoint-best-f1', 'model.bin')
+        #     if not os.path.exists(output_dir):
+        #         # linevul/saved_models/dataset_size/imbalanced_0.01/checkpoint-best-f1
+        #         output_dir = os.path.join(args.output_dir, args.model_name, 'checkpoint-best-f1', 'model.bin')
+            
+        output_dir = os.path.join(args.output_dir, 'checkpoint-last', '1_linevul.bin')
         model.load_state_dict(torch.load(output_dir, map_location=args.device))
         model.to(args.device)
         test_dataset = TextDataset(tokenizer, args, file_type='test', return_index=True)

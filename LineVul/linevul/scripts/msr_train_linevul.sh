@@ -9,7 +9,7 @@ dataset=$2
 shift
 shift
 
-python linevul_main.py \
+CUDA_VISIBLE_DEVICES=0 python linevul_main.py \
   --model_name=${seed}_linevul.bin \
   --output_dir=./saved_models \
   --model_type=roberta \
@@ -20,10 +20,10 @@ python linevul_main.py \
   --train_data_file=../data/$dataset/train.csv \
   --eval_data_file=../data/$dataset/val.csv \
   --test_data_file=../data/$dataset/test.csv \
-  --epochs 10 \
+  --epochs 5 \
   --block_size 512 \
-  --train_batch_size 16 \
-  --eval_batch_size 16 \
+  --train_batch_size 4 \
+  --eval_batch_size 4 \
   --learning_rate 2e-5 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \
